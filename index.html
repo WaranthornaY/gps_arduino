@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Arduino Map Streamer</title>
+    <style>
+        body { font-family: sans-serif; text-align: center; background: #222; color: #fff; padding-top: 50px; }
+        button { padding: 15px 30px; font-size: 18px; font-weight: bold; background: #00ff66; border: none; cursor: pointer; border-radius: 5px; }
+        button:hover { background: #00cc52; }
+        #status { margin-top: 20px; font-size: 16px; color: #aaa; }
+    </style>
+</head>
+<body>
+
+    <h1>Web Map Streamer</h1>
+    <p>Bypassing Android Studio to talk directly to your screen over USB.</p>
+    
+    <button id="connectBtn">CONNECT TO ARDUINO</button>
+    <div id="status">Status: Disconnected</div>
+
+    <script>
+        let port;
+        let writer;
+        const connectBtn = document.getElementById('connectBtn');
+        const statusDiv = document.getElementById('status');
+
+        connectBtn.addEventListener('click', async () => {
+            if (!("serial" in navigator)) {
+                alert("Web Serial API not supported! Please use Google Chrome or Microsoft Edge browser.");
+                return;
+            }
+
+            try {
+                // 1. Prompt user to select the Arduino USB port
+                port = await navigator.serial.requestPort();
+                await port.open({ baudRate: 115200 }); // Matches your Arduino speed!
+                writer = port.writable.getWriter();
+                
+                statusDiv.innerText = "Status: Connected! Fetching GPS...";
+                connectBtn.style.background = "#aaa";
+                connectBtn.disabled = true;
+
+                // 2. Start tracking GPS location
+                if (navigator.geolocation) {
+                    navigator.geolocation.watchPosition(sendLiveMap, (err) => {
+                        statusDiv.innerText = "GPS Error: " + err.message;
+                    }, { enableHighAccuracy: true });
+                } else {
+                    statusDiv.innerText = "Geolocation not supported by this browser.";
+                }
+
+            } catch (err) {
+                statusDiv.innerText = "Connection Failed: " + err.message;
+            }
+        });
+
+        async joinMapData(lat, lng) {
+            statusDiv.innerText = `Location: ${lat.toFixed(4)}, ${lng.toFixed(4)} | Fetching map...`;
+            
+            // 3. Fetch free map graphics (128x160 canvas size)
+            const mapUrl = `https://yandex.ru{lng},${lat}&z=16&size=128,160&l=map`;
+            
+            const img = new Image();
+            img.crossOrigin = "Anonymous"; 
+            img.src = mapUrl;
+            
+            img.onload = async () => {
+                // Process image data in HTML5 hidden canvas
+                const canvas = document.createElement('canvas');
+                canvas.width = 128;
+                canvas.height = 160;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(img, 0, 0);
+                
+                const imgData = ctx.getImageData(0, 0, 128, 160).data;
+                const rgb565Buffer = new Uint8Array(128 * 160 * 2);
+                let idx = 0;
+
+                // 4. Down-sample 32-bit colors to 16-bit RGB565 byte array matching ST7735 screen
+                for (let i = 0; i < imgData.length; i += 4) {
+                    const r = imgData[i];
+                    const g = imgData[i+1];
+                    const b = imgData[i+2];
+
+                    const rgb565 = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+                    rgb565Buffer[idx++] = (rgb565 >> 8) & 0xFF; // High Byte
+                    rgb565Buffer[idx++] = rgb565 & 0xFF;        // Low Byte
+                }
+
+                // 5. Blast raw byte packet stream straight down the USB pipe channel
+                statusDiv.innerText = "Streaming map to Arduino screen...";
+                await writer.write(rgb565Buffer);
+                statusDiv.innerText = "Map updated successfully!";
+            };
+        }
+
+        function sendLiveMap(position) {
+            const lat = position.coords.latitude;
+            const lng = position.coords.longitude;
+            joinMapData(lat, lng);
+        }
+    </script>
+</body>
+</html>
